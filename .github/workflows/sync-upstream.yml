@@ -1,0 +1,229 @@
+name: Sync Upstream Code And Tags
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run sync without pushing changes
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve upstream repository
+        id: repo
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.get(context.repo);
+            if (!data.fork || !data.parent?.clone_url) {
+              core.setFailed("This repository is not a fork or no upstream parent was found.");
+              return;
+            }
+
+            core.info(`Using upstream: ${data.parent.full_name}`);
+            core.setOutput("upstream_clone_url", data.parent.clone_url);
+            core.setOutput("upstream_default_branch", data.parent.default_branch);
+
+      - name: Fetch upstream branches and tags
+        env:
+          UPSTREAM_URL: ${{ steps.repo.outputs.upstream_clone_url }}
+          UPSTREAM_DEFAULT_BRANCH: ${{ steps.repo.outputs.upstream_default_branch }}
+        run: |
+          set -euo pipefail
+
+          git remote remove upstream >/dev/null 2>&1 || true
+          git remote add upstream "${UPSTREAM_URL}"
+          git fetch upstream \
+            "+refs/heads/${UPSTREAM_DEFAULT_BRANCH}:refs/remotes/upstream/${UPSTREAM_DEFAULT_BRANCH}" \
+            "+refs/tags/*:refs/tags/*" \
+            --force \
+            --prune \
+            --prune-tags
+
+      - name: Sync code from upstream default branch (ff-only)
+        id: sync_code
+        env:
+          UPSTREAM_DEFAULT_BRANCH: ${{ steps.repo.outputs.upstream_default_branch }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          upstream_ref="refs/remotes/upstream/${UPSTREAM_DEFAULT_BRANCH}"
+          origin_ref="refs/heads/${UPSTREAM_DEFAULT_BRANCH}"
+          code_changed="false"
+          would_change_code="false"
+
+          if ! git show-ref --verify --quiet "${upstream_ref}"; then
+            echo "Upstream default branch not found: ${UPSTREAM_DEFAULT_BRANCH}" >&2
+            exit 1
+          fi
+
+          git fetch origin "+${origin_ref}:refs/remotes/origin/${UPSTREAM_DEFAULT_BRANCH}" --force || true
+
+          upstream_sha=$(git rev-parse "${upstream_ref}")
+          origin_sha=$(git ls-remote --heads --refs origin "${UPSTREAM_DEFAULT_BRANCH}" | awk '{print $1}')
+
+          echo "Upstream ${UPSTREAM_DEFAULT_BRANCH}: ${upstream_sha}"
+          if [[ -n "${origin_sha}" ]]; then
+            echo "Origin ${UPSTREAM_DEFAULT_BRANCH}: ${origin_sha}"
+          else
+            echo "Origin ${UPSTREAM_DEFAULT_BRANCH}: <missing>"
+          fi
+
+          if [[ "${origin_sha}" != "${upstream_sha}" ]]; then
+            would_change_code="true"
+          fi
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            if [[ -z "${origin_sha}" ]]; then
+              echo "Would create origin/${UPSTREAM_DEFAULT_BRANCH} at ${upstream_sha}"
+            elif [[ "${origin_sha}" == "${upstream_sha}" ]]; then
+              echo "Branch already in sync. No code push needed."
+            else
+              echo "Would update origin/${UPSTREAM_DEFAULT_BRANCH} to ${upstream_sha}"
+            fi
+            echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
+            echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ "${origin_sha}" == "${upstream_sha}" ]]; then
+            echo "Branch already in sync. Skipping code push."
+            echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
+            echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ -z "${origin_sha}" ]]; then
+            git push origin "${upstream_ref}:${origin_ref}"
+            code_changed="true"
+            echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
+            echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! git show-ref --verify --quiet "refs/remotes/origin/${UPSTREAM_DEFAULT_BRANCH}"; then
+            echo "Origin default branch ref not available locally: ${UPSTREAM_DEFAULT_BRANCH}" >&2
+            exit 1
+          fi
+
+          git checkout -B sync-origin "refs/remotes/origin/${UPSTREAM_DEFAULT_BRANCH}"
+          git merge --ff-only "${upstream_ref}"
+          git push origin "sync-origin:${origin_ref}"
+          code_changed="true"
+          echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
+          echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
+
+      - name: Sync tags from upstream
+        id: sync_tags
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t upstream_tags < <(git tag -l | sort)
+          mapfile -t origin_tags < <(git ls-remote --tags --refs origin | awk '{print $2}' | sed 's|refs/tags/||' | sort)
+          upstream_tags_file="$(mktemp)"
+          origin_tags_file="$(mktemp)"
+          tags_changed="false"
+          would_change_tags="false"
+
+          git for-each-ref refs/tags --format='%(objectname) %(refname:strip=2)' | sort > "${upstream_tags_file}"
+          git ls-remote --tags --refs origin | awk '{sub("^refs/tags/","",$2); print $1" "$2}' | sort > "${origin_tags_file}"
+
+          tags_to_delete=()
+          declare -A upstream_lookup=()
+
+          for tag in "${upstream_tags[@]}"; do
+            upstream_lookup["$tag"]=1
+          done
+
+          for tag in "${origin_tags[@]}"; do
+            if [[ -z "${upstream_lookup[$tag]+x}" ]]; then
+              tags_to_delete+=("$tag")
+            fi
+          done
+
+          echo "Upstream tags: ${#upstream_tags[@]}"
+          echo "Origin tags: ${#origin_tags[@]}"
+          echo "Tags to delete on origin: ${#tags_to_delete[@]}"
+
+          if ! diff -q "${upstream_tags_file}" "${origin_tags_file}" >/dev/null; then
+            would_change_tags="true"
+          fi
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            if [[ "${would_change_tags}" == "false" ]]; then
+              echo "Tags already in sync. No tag push needed."
+              echo "changed_tags=${tags_changed}" >> "${GITHUB_OUTPUT}"
+              echo "would_change_tags=${would_change_tags}" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            if ((${#tags_to_delete[@]} > 0)); then
+              printf 'Would delete on origin: %s\n' "${tags_to_delete[@]}"
+            else
+              echo "Would delete on origin: <none>"
+            fi
+            echo "Would push all upstream tags to origin."
+            echo "changed_tags=${tags_changed}" >> "${GITHUB_OUTPUT}"
+            echo "would_change_tags=${would_change_tags}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ "${would_change_tags}" == "false" ]]; then
+            echo "Tags already in sync. Skipping tag push."
+            echo "changed_tags=${tags_changed}" >> "${GITHUB_OUTPUT}"
+            echo "would_change_tags=${would_change_tags}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ((${#tags_to_delete[@]} > 0)); then
+            git push origin --delete "${tags_to_delete[@]}"
+          fi
+
+          git push origin "+refs/tags/*:refs/tags/*"
+          tags_changed="true"
+          echo "changed_tags=${tags_changed}" >> "${GITHUB_OUTPUT}"
+          echo "would_change_tags=${would_change_tags}" >> "${GITHUB_OUTPUT}"
+
+      - name: Sync summary
+        if: always()
+        env:
+          CHANGED_CODE: ${{ steps.sync_code.outputs.changed_code || 'false' }}
+          WOULD_CHANGE_CODE: ${{ steps.sync_code.outputs.would_change_code || 'false' }}
+          CHANGED_TAGS: ${{ steps.sync_tags.outputs.changed_tags || 'false' }}
+          WOULD_CHANGE_TAGS: ${{ steps.sync_tags.outputs.would_change_tags || 'false' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          echo "changed_code=${CHANGED_CODE}"
+          echo "would_change_code=${WOULD_CHANGE_CODE}"
+          echo "changed_tags=${CHANGED_TAGS}"
+          echo "would_change_tags=${WOULD_CHANGE_TAGS}"
+          {
+            echo "## Upstream Sync Summary"
+            echo "- dry_run: ${DRY_RUN}"
+            echo "- changed_code: ${CHANGED_CODE}"
+            echo "- would_change_code: ${WOULD_CHANGE_CODE}"
+            echo "- changed_tags: ${CHANGED_TAGS}"
+            echo "- would_change_tags: ${WOULD_CHANGE_TAGS}"
+          } >> "${GITHUB_STEP_SUMMARY}"
