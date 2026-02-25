@@ -59,7 +59,7 @@ jobs:
             --prune \
             --prune-tags
 
-      - name: Sync code from upstream default branch (ff-only)
+      - name: Sync code from upstream default branch (merge)
         id: sync_code
         env:
           UPSTREAM_DEFAULT_BRANCH: ${{ steps.repo.outputs.upstream_default_branch }}
@@ -69,6 +69,7 @@ jobs:
 
           upstream_ref="refs/remotes/upstream/${UPSTREAM_DEFAULT_BRANCH}"
           origin_ref="refs/heads/${UPSTREAM_DEFAULT_BRANCH}"
+          origin_remote_ref="refs/remotes/origin/${UPSTREAM_DEFAULT_BRANCH}"
           code_changed="false"
           would_change_code="false"
 
@@ -89,24 +90,30 @@ jobs:
             echo "Origin ${UPSTREAM_DEFAULT_BRANCH}: <missing>"
           fi
 
-          if [[ "${origin_sha}" != "${upstream_sha}" ]]; then
+          if [[ -z "${origin_sha}" ]]; then
+            would_change_code="true"
+          elif ! git show-ref --verify --quiet "${origin_remote_ref}"; then
+            would_change_code="true"
+          elif git merge-base --is-ancestor "${upstream_ref}" "${origin_remote_ref}"; then
+            would_change_code="false"
+          else
             would_change_code="true"
           fi
 
           if [[ "${DRY_RUN}" == "true" ]]; then
             if [[ -z "${origin_sha}" ]]; then
               echo "Would create origin/${UPSTREAM_DEFAULT_BRANCH} at ${upstream_sha}"
-            elif [[ "${origin_sha}" == "${upstream_sha}" ]]; then
+            elif [[ "${would_change_code}" == "false" ]]; then
               echo "Branch already in sync. No code push needed."
             else
-              echo "Would update origin/${UPSTREAM_DEFAULT_BRANCH} to ${upstream_sha}"
+              echo "Would merge upstream/${UPSTREAM_DEFAULT_BRANCH} into origin/${UPSTREAM_DEFAULT_BRANCH}"
             fi
             echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
             echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
-          if [[ "${origin_sha}" == "${upstream_sha}" ]]; then
+          if [[ "${would_change_code}" == "false" ]]; then
             echo "Branch already in sync. Skipping code push."
             echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
             echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
@@ -121,13 +128,23 @@ jobs:
             exit 0
           fi
 
-          if ! git show-ref --verify --quiet "refs/remotes/origin/${UPSTREAM_DEFAULT_BRANCH}"; then
+          if ! git show-ref --verify --quiet "${origin_remote_ref}"; then
             echo "Origin default branch ref not available locally: ${UPSTREAM_DEFAULT_BRANCH}" >&2
             exit 1
           fi
 
-          git checkout -B sync-origin "refs/remotes/origin/${UPSTREAM_DEFAULT_BRANCH}"
-          git merge --ff-only "${upstream_ref}"
+          git checkout -B sync-origin "${origin_remote_ref}"
+          before_merge_sha=$(git rev-parse sync-origin)
+          git merge --no-edit --allow-unrelated-histories "${upstream_ref}"
+          after_merge_sha=$(git rev-parse sync-origin)
+
+          if [[ "${before_merge_sha}" == "${after_merge_sha}" ]]; then
+            echo "Merge produced no changes. Skipping code push."
+            echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
+            echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           git push origin "sync-origin:${origin_ref}"
           code_changed="true"
           echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
