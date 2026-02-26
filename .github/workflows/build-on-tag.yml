@@ -1,0 +1,135 @@
+name: Build Debian Package On Tag
+
+on:
+  push:
+    tags:
+      - "*"
+  repository_dispatch:
+    types:
+      - upstream_tag_synced
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (required for manual runs)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-on-tag-${{ github.event.client_payload.tag || github.ref_name || github.event.inputs.tag || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve build parameters
+        id: params
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          tag=""
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            tag="${PUSH_TAG}"
+          elif [[ "${EVENT_NAME}" == "repository_dispatch" ]]; then
+            tag="${DISPATCH_TAG}"
+          else
+            tag="${INPUT_TAG}"
+          fi
+
+          if [[ -z "${tag}" ]]; then
+            echo "Tag could not be resolved for this run." >&2
+            exit 1
+          fi
+
+          connections_limit="100"
+          connections_file=""
+          build_command="git clone --depth=1 https://github.com/ONLYOFFICE/build_tools.git /tmp/build_tools && cd /tmp/build_tools/tools/linux && ./automate.py server"
+          package_command="cd /tmp/build_tools && python3 make_package.py -P linux_x86_64 -T server_community"
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "connections_limit=${connections_limit}" >> "${GITHUB_OUTPUT}"
+          echo "connections_file=${connections_file}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "build_command<<EOF"
+            echo "${build_command}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "package_command<<EOF"
+            echo "${package_command}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout tag with submodules
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.params.outputs.tag }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set Git identity
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Ensure packaging tools
+        run: |
+          set -euo pipefail
+          if ! command -v dpkg-buildpackage >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y dpkg-dev debhelper devscripts fakeroot
+          fi
+
+      - name: Apply concurrent connections limit
+        run: |
+          set -euo pipefail
+          chmod +x ./scripts/apply-connections-limit.sh
+          ./scripts/apply-connections-limit.sh \
+            "${{ steps.params.outputs.connections_limit }}" \
+            "${{ steps.params.outputs.connections_file }}"
+
+      - name: Build project
+        env:
+          BUILD_COMMAND: ${{ steps.params.outputs.build_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "${BUILD_COMMAND}"
+
+      - name: Package .deb
+        env:
+          PACKAGE_COMMAND: ${{ steps.params.outputs.package_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "${PACKAGE_COMMAND}"
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: onlyoffice-deb-${{ steps.params.outputs.tag }}
+          path: |
+            **/*.deb
+          if-no-files-found: error
+
+      - name: Build summary
+        run: |
+          {
+            echo "## Debian Build Summary"
+            echo "- tag: ${{ steps.params.outputs.tag }}"
+            echo "- connections_limit: ${{ steps.params.outputs.connections_limit }}"
+            if [[ -n "${{ steps.params.outputs.connections_file }}" ]]; then
+              echo "- connections_file: ${{ steps.params.outputs.connections_file }}"
+            else
+              echo "- connections_file: <auto-detect>"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
