@@ -113,10 +113,56 @@ jobs:
       - name: Apply concurrent connections limit
         run: |
           set -euo pipefail
-          chmod +x ./scripts/apply-connections-limit.sh
-          ./scripts/apply-connections-limit.sh \
-            "${{ steps.params.outputs.connections_limit }}" \
-            "${{ steps.params.outputs.connections_file }}"
+          new_limit="${{ steps.params.outputs.connections_limit }}"
+          target_file="${{ steps.params.outputs.connections_file }}"
+
+          if ! [[ "${new_limit}" =~ ^[0-9]+$ ]]; then
+            echo "Invalid connections limit: ${new_limit}" >&2
+            exit 1
+          fi
+
+          if [[ -n "${target_file}" ]]; then
+            if [[ ! -f "${target_file}" ]]; then
+              echo "Configured connections file not found: ${target_file}" >&2
+              exit 1
+            fi
+            candidate_file="${target_file}"
+          else
+            mapfile -t candidates < <(
+              rg -l --hidden --glob '!**/.git/**' \
+                '"(max_connections|maxConnections|connections)"[[:space:]]*:[[:space:]]*20' \
+                server || true
+            )
+
+            if ((${#candidates[@]} == 0)); then
+              echo "Could not auto-detect a connections file in ./server." >&2
+              echo "Set a fixed path in the workflow if needed." >&2
+              exit 1
+            fi
+
+            if ((${#candidates[@]} > 1)); then
+              echo "Multiple candidate files found. Set a fixed connections file path." >&2
+              printf ' - %s\n' "${candidates[@]}" >&2
+              exit 1
+            fi
+
+            candidate_file="${candidates[0]}"
+          fi
+
+          before_hash="$(sha256sum "${candidate_file}" | awk '{print $1}')"
+          perl -0777 -i -pe "
+            s/(\"max_connections\"\\s*:\\s*)\\d+/\\1${new_limit}/g;
+            s/(\"maxConnections\"\\s*:\\s*)\\d+/\\1${new_limit}/g;
+            s/(\"connections\"\\s*:\\s*)20/\\1${new_limit}/g;
+          " "${candidate_file}"
+          after_hash="$(sha256sum "${candidate_file}" | awk '{print $1}')"
+
+          if [[ "${before_hash}" == "${after_hash}" ]]; then
+            echo "No connection-limit change was applied in ${candidate_file}." >&2
+            exit 1
+          fi
+
+          echo "Updated concurrent connections limit to ${new_limit} in ${candidate_file}"
 
       - name: Build project
         env:
