@@ -26,7 +26,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Set Git identity
         run: |
@@ -87,6 +87,8 @@ jobs:
 
           upstream_sha=$(git rev-parse "${upstream_ref}")
           origin_sha=$(git ls-remote --heads --refs origin "${UPSTREAM_DEFAULT_BRANCH}" | awk '{print $1}')
+          upstream_tree_sha=$(git rev-parse "${upstream_ref}^{tree}")
+          origin_tree_sha=""
 
           echo "Upstream ${UPSTREAM_DEFAULT_BRANCH}: ${upstream_sha}"
           if [[ -n "${origin_sha}" ]]; then
@@ -99,10 +101,15 @@ jobs:
             would_change_code="true"
           elif ! git show-ref --verify --quiet "${origin_remote_ref}"; then
             would_change_code="true"
-          elif git merge-base --is-ancestor "${upstream_ref}" "${origin_remote_ref}"; then
-            would_change_code="false"
           else
-            would_change_code="true"
+            origin_tree_sha=$(git rev-parse "${origin_remote_ref}^{tree}")
+            if [[ "${origin_tree_sha}" == "${upstream_tree_sha}" ]]; then
+              would_change_code="false"
+            elif git merge-base --is-ancestor "${upstream_ref}" "${origin_remote_ref}"; then
+              would_change_code="false"
+            else
+              would_change_code="true"
+            fi
           fi
 
           if [[ "${DRY_RUN}" == "true" ]]; then
@@ -119,7 +126,11 @@ jobs:
           fi
 
           if [[ "${would_change_code}" == "false" ]]; then
-            echo "Branch already in sync. Skipping code push."
+            if [[ -n "${origin_tree_sha}" && "${origin_tree_sha}" == "${upstream_tree_sha}" ]]; then
+              echo "Trees already equal. Skipping empty merge and code push."
+            else
+              echo "Branch already in sync. Skipping code push."
+            fi
             echo "changed_code=${code_changed}" >> "${GITHUB_OUTPUT}"
             echo "would_change_code=${would_change_code}" >> "${GITHUB_OUTPUT}"
             exit 0
