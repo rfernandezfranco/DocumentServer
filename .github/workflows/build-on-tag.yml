@@ -51,25 +51,7 @@ jobs:
           if [[ -z "${tag}" ]]; then
             tag="$(
               GITHUB_TOKEN="${GITHUB_TOKEN}" GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
-              python3 -c '
-import json
-import os
-import urllib.request
-
-token = os.environ["GITHUB_TOKEN"]
-repo = os.environ["GITHUB_REPOSITORY"]
-url = f"https://api.github.com/repos/{repo}/tags?per_page=1"
-req = urllib.request.Request(
-    url,
-    headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-    },
-)
-with urllib.request.urlopen(req) as response:
-    data = json.load(response)
-print(data[0]["name"] if data else "")
-'
+              python3 -c 'import json,os,urllib.request; token=os.environ["GITHUB_TOKEN"]; repo=os.environ["GITHUB_REPOSITORY"]; req=urllib.request.Request(f"https://api.github.com/repos/{repo}/tags?per_page=1", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}); data=json.load(urllib.request.urlopen(req)); print(data[0]["name"] if data else "")'
             )"
           fi
 
