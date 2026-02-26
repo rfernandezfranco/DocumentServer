@@ -67,8 +67,8 @@ jobs:
             GITHUB_TOKEN="${GITHUB_TOKEN}" BUILD_TOOLS_REPO="${build_tools_repo}" \
             python3 -c 'import json,os,urllib.request; token=os.environ["GITHUB_TOKEN"]; repo=os.environ["BUILD_TOOLS_REPO"]; req=urllib.request.Request(f"https://api.github.com/repos/{repo}/tags?per_page=1", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}); data=json.load(urllib.request.urlopen(req)); print(data[0]["name"] if data else "")'
           )"
-          build_command="cd /tmp/build_tools/tools/linux && ./automate.py server"
-          package_command="cd /tmp/build_tools && python3 make_package.py -P linux_x86_64 -T server_community"
+          build_command="cd ./build_tools/tools/linux && ./automate.py server --update=0 --branch=${tag}"
+          package_command="cd ./build_tools && python3 make_package.py -P linux_x86_64 -T server_community"
 
           if [[ -z "${build_tools_ref}" ]]; then
             echo "Could not resolve latest tag for ${build_tools_repo}" >&2
@@ -118,6 +118,35 @@ jobs:
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git submodule sync --recursive
           git submodule update --init --recursive --jobs 8
+
+      - name: Prepare additional repositories for local build layout
+        env:
+          TAG: ${{ steps.params.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          required_repos=(
+            "onlyoffice.github.io"
+            "document-server-integration"
+            "document-templates"
+            "document-formats"
+          )
+
+          for repo in "${required_repos[@]}"; do
+            if [[ -d "${repo}/.git" ]]; then
+              echo "Repository already present: ${repo}"
+              continue
+            fi
+
+            repo_url="https://github.com/ONLYOFFICE/${repo}.git"
+            if git ls-remote --exit-code --tags "${repo_url}" "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "Cloning ${repo} at tag ${TAG}"
+              git clone --depth=1 --branch "${TAG}" "${repo_url}" "${repo}"
+            else
+              echo "Tag ${TAG} not found in ${repo}. Cloning master."
+              git clone --depth=1 --branch master "${repo_url}" "${repo}"
+            fi
+          done
 
       - name: Set Git identity
         run: |
@@ -180,11 +209,11 @@ jobs:
           BUILD_TOOLS_REF: ${{ steps.params.outputs.build_tools_ref }}
         run: |
           set -euo pipefail
-          rm -rf /tmp/build_tools
-          git init /tmp/build_tools
-          git -C /tmp/build_tools remote add origin "https://github.com/${BUILD_TOOLS_REPO}.git"
-          git -C /tmp/build_tools fetch --depth=1 origin "${BUILD_TOOLS_REF}"
-          git -C /tmp/build_tools checkout --force FETCH_HEAD
+          rm -rf ./build_tools
+          git init ./build_tools
+          git -C ./build_tools remote add origin "https://github.com/${BUILD_TOOLS_REPO}.git"
+          git -C ./build_tools fetch --depth=1 origin "${BUILD_TOOLS_REF}"
+          git -C ./build_tools checkout --force FETCH_HEAD
 
       - name: Build project
         env:
