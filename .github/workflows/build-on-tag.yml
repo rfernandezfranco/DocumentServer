@@ -77,21 +77,23 @@ jobs:
           ref: refs/tags/${{ steps.params.outputs.tag }}
           fetch-depth: 0
           submodules: false
+          token: ${{ github.token }}
 
       - name: Configure submodules to upstream sources
         run: |
           set -euo pipefail
 
-          while read -r key rel_url; do
-            if [[ "${rel_url}" == ../* ]]; then
-              repo="${rel_url#../}"
-              git config "${key}" "https://github.com/ONLYOFFICE/${repo}"
+          while read -r key url; do
+            if [[ "${url}" == ../* ]]; then
+              repo="${url#../}"
+              git config -f .gitmodules "${key}" "https://github.com/ONLYOFFICE/${repo}"
             fi
-          done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.url$')
+          done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.url$' || true)
 
       - name: Initialize submodules
         run: |
           set -euo pipefail
+          git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git submodule sync --recursive
           git submodule update --init --recursive --jobs 8
 
