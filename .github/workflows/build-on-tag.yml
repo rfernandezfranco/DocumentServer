@@ -62,13 +62,12 @@ jobs:
 
           connections_limit="100"
           connections_file="server/Common/sources/constants.js"
+          build_branch="tags/${tag}"
           build_tools_repo="ONLYOFFICE/build_tools"
           build_tools_ref="$(
             GITHUB_TOKEN="${GITHUB_TOKEN}" BUILD_TOOLS_REPO="${build_tools_repo}" \
             python3 -c 'import json,os,urllib.request; token=os.environ["GITHUB_TOKEN"]; repo=os.environ["BUILD_TOOLS_REPO"]; req=urllib.request.Request(f"https://api.github.com/repos/{repo}/tags?per_page=1", headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}); data=json.load(urllib.request.urlopen(req)); print(data[0]["name"] if data else "")'
           )"
-          build_command="cd ./build_tools/tools/linux && ./automate.py server --update=0 --branch=${tag}"
-          package_command="cd ./build_tools && python3 make_package.py -P linux_x86_64 -T server_community"
 
           if [[ -z "${build_tools_ref}" ]]; then
             echo "Could not resolve latest tag for ${build_tools_repo}" >&2
@@ -78,20 +77,9 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "connections_limit=${connections_limit}" >> "${GITHUB_OUTPUT}"
           echo "connections_file=${connections_file}" >> "${GITHUB_OUTPUT}"
+          echo "build_branch=${build_branch}" >> "${GITHUB_OUTPUT}"
           echo "build_tools_repo=${build_tools_repo}" >> "${GITHUB_OUTPUT}"
           echo "build_tools_ref=${build_tools_ref}" >> "${GITHUB_OUTPUT}"
-
-          {
-            echo "build_command<<EOF"
-            echo "${build_command}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
-
-          {
-            echo "package_command<<EOF"
-            echo "${package_command}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
 
       - name: Checkout tag with submodules
         uses: actions/checkout@v4
@@ -215,19 +203,39 @@ jobs:
           git -C ./build_tools fetch --depth=1 origin "${BUILD_TOOLS_REF}"
           git -C ./build_tools checkout --force FETCH_HEAD
 
-      - name: Build project
-        env:
-          BUILD_COMMAND: ${{ steps.params.outputs.build_command }}
+      - name: Install build_tools dependencies and Qt
         run: |
           set -euo pipefail
-          bash -lc "${BUILD_COMMAND}"
+          cd ./build_tools/tools/linux
+          python3 deps.py
+          python3 qt_binary_fetch.py all
+
+      - name: Configure and build project
+        run: |
+          set -euo pipefail
+          tag="${{ steps.params.outputs.tag }}"
+          branch="tags/${tag}"
+          qt_dir="${GITHUB_WORKSPACE}/build_tools/tools/linux/qt_build/Qt-5.9.9"
+
+          if [[ -z "${tag}" ]]; then
+            echo "Resolved tag is empty." >&2
+            exit 1
+          fi
+
+          cd ./build_tools
+          python3 ./configure.py \
+            --module "server" \
+            --platform "linux_64" \
+            --update "0" \
+            --branch "${branch}" \
+            --qt-dir "${qt_dir}"
+          python3 ./make.py
 
       - name: Package .deb
-        env:
-          PACKAGE_COMMAND: ${{ steps.params.outputs.package_command }}
         run: |
           set -euo pipefail
-          bash -lc "${PACKAGE_COMMAND}"
+          cd ./build_tools
+          python3 make_package.py -P linux_x86_64 -T server_community
 
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
@@ -242,6 +250,7 @@ jobs:
           {
             echo "## Debian Build Summary"
             echo "- tag: ${{ steps.params.outputs.tag }}"
+            echo "- build_branch: ${{ steps.params.outputs.build_branch }}"
             echo "- connections_limit: ${{ steps.params.outputs.connections_limit }}"
             echo "- build_tools_repo: ${{ steps.params.outputs.build_tools_repo }}"
             echo "- build_tools_ref: ${{ steps.params.outputs.build_tools_ref }}"
