@@ -208,19 +208,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          selected_ref="${BUILD_TOOLS_REF}"
+          selected_ref=""
+          selected_ref_kind=""
           build_tools_url="https://github.com/${BUILD_TOOLS_REPO}.git"
+
+          # 1) Prefer exact build_tools tag == document tag.
           if git ls-remote --exit-code --tags "${build_tools_url}" "refs/tags/${TAG}" >/dev/null 2>&1; then
             selected_ref="${TAG}"
+            selected_ref_kind="tag"
           fi
 
-          echo "Selected build_tools ref: ${selected_ref}"
+          # 2) If there is no exact tag, prefer release branch for the same document tag.
+          if [[ -z "${selected_ref}" ]] && git ls-remote --exit-code --heads "${build_tools_url}" "refs/heads/release/${TAG}" >/dev/null 2>&1; then
+            selected_ref="release/${TAG}"
+            selected_ref_kind="branch"
+          fi
+
+          # 3) Last resort: fallback to latest build_tools tag.
+          if [[ -z "${selected_ref}" ]]; then
+            selected_ref="${BUILD_TOOLS_REF}"
+            selected_ref_kind="tag"
+          fi
+
+          echo "Selected build_tools ref: ${selected_ref} (${selected_ref_kind})"
           rm -rf ./build_tools
           git init ./build_tools
           git -C ./build_tools remote add origin "${build_tools_url}"
-          git -C ./build_tools fetch --depth=1 origin "${selected_ref}"
+          if [[ "${selected_ref_kind}" == "branch" ]]; then
+            git -C ./build_tools fetch --depth=1 origin "refs/heads/${selected_ref}"
+          else
+            git -C ./build_tools fetch --depth=1 origin "${selected_ref}"
+          fi
           git -C ./build_tools checkout --force FETCH_HEAD
           echo "selected_ref=${selected_ref}" >> "${GITHUB_OUTPUT}"
+          echo "selected_ref_kind=${selected_ref_kind}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate build_tools core project list
+        run: |
+          set -euo pipefail
+          if ! grep -Fq 'core/DesktopEditor/xmlsec/src/ooxmlsignature.pro' ./build_tools/sln.json; then
+            echo "Selected build_tools ref is incompatible: ooxmlsignature project missing in sln.json" >&2
+            exit 1
+          fi
 
       - name: Install build_tools dependencies and Qt
         run: |
@@ -274,6 +303,7 @@ jobs:
             echo "- build_tools_repo: ${{ steps.params.outputs.build_tools_repo }}"
             echo "- build_tools_ref_fallback: ${{ steps.params.outputs.build_tools_ref }}"
             echo "- build_tools_ref_selected: ${{ steps.build_tools_checkout.outputs.selected_ref }}"
+            echo "- build_tools_ref_kind: ${{ steps.build_tools_checkout.outputs.selected_ref_kind }}"
             if [[ -n "${{ steps.params.outputs.connections_file }}" ]]; then
               echo "- connections_file: ${{ steps.params.outputs.connections_file }}"
             else
