@@ -150,6 +150,14 @@ jobs:
             python-is-python3 \
             perl \
             ripgrep \
+            gperf \
+            pkg-config \
+            xsltproc \
+            libxml2-utils \
+            libxml2-dev \
+            libxslt1-dev \
+            libxmlsec1-dev \
+            libxmlsec1-openssl \
             dpkg-dev \
             debhelper \
             devscripts \
@@ -191,17 +199,28 @@ jobs:
           set -euo pipefail
           sudo rm -f /usr/local/bin/grunt
 
-      - name: Checkout build_tools at latest tag
+      - name: Checkout build_tools (same tag if available, fallback latest)
+        id: build_tools_checkout
         env:
           BUILD_TOOLS_REPO: ${{ steps.params.outputs.build_tools_repo }}
           BUILD_TOOLS_REF: ${{ steps.params.outputs.build_tools_ref }}
+          TAG: ${{ steps.params.outputs.tag }}
         run: |
           set -euo pipefail
+
+          selected_ref="${BUILD_TOOLS_REF}"
+          build_tools_url="https://github.com/${BUILD_TOOLS_REPO}.git"
+          if git ls-remote --exit-code --tags "${build_tools_url}" "refs/tags/${TAG}" >/dev/null 2>&1; then
+            selected_ref="${TAG}"
+          fi
+
+          echo "Selected build_tools ref: ${selected_ref}"
           rm -rf ./build_tools
           git init ./build_tools
-          git -C ./build_tools remote add origin "https://github.com/${BUILD_TOOLS_REPO}.git"
-          git -C ./build_tools fetch --depth=1 origin "${BUILD_TOOLS_REF}"
+          git -C ./build_tools remote add origin "${build_tools_url}"
+          git -C ./build_tools fetch --depth=1 origin "${selected_ref}"
           git -C ./build_tools checkout --force FETCH_HEAD
+          echo "selected_ref=${selected_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Install build_tools dependencies and Qt
         run: |
@@ -253,7 +272,8 @@ jobs:
             echo "- build_branch: ${{ steps.params.outputs.build_branch }}"
             echo "- connections_limit: ${{ steps.params.outputs.connections_limit }}"
             echo "- build_tools_repo: ${{ steps.params.outputs.build_tools_repo }}"
-            echo "- build_tools_ref: ${{ steps.params.outputs.build_tools_ref }}"
+            echo "- build_tools_ref_fallback: ${{ steps.params.outputs.build_tools_ref }}"
+            echo "- build_tools_ref_selected: ${{ steps.build_tools_checkout.outputs.selected_ref }}"
             if [[ -n "${{ steps.params.outputs.connections_file }}" ]]; then
               echo "- connections_file: ${{ steps.params.outputs.connections_file }}"
             else
