@@ -116,6 +116,7 @@ jobs:
           required_repos=(
             "onlyoffice.github.io"
             "document-server-integration"
+            "document-server-package"
             "document-templates"
             "document-formats"
           )
