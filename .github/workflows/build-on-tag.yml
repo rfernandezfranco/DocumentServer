@@ -280,6 +280,26 @@ jobs:
             --qt-dir "${qt_dir}"
           python3 ./make.py
 
+      - name: Patch packaging for runner dpkg-deb compatibility
+        run: |
+          set -euo pipefail
+
+          if [[ ! -d ./document-server-package ]]; then
+            echo "document-server-package repository is missing." >&2
+            exit 1
+          fi
+
+          mapfile -t rules_files < <(find ./document-server-package -path '*/debian/rules' -type f)
+          if [[ "${#rules_files[@]}" -eq 0 ]]; then
+            echo "No debian/rules file found in document-server-package." >&2
+            exit 1
+          fi
+
+          for rules_file in "${rules_files[@]}"; do
+            perl -0pi -e 's/\s+--threads-max=\d+//g' "${rules_file}"
+            echo "Patched ${rules_file}"
+          done
+
       - name: Package .deb
         run: |
           set -euo pipefail
