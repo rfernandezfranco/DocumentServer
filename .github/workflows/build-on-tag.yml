@@ -63,6 +63,20 @@ jobs:
           connections_limit="100"
           connections_file="server/Common/sources/constants.js"
           build_branch="tags/${tag}"
+          package_version="${tag#v}"
+          package_build="1"
+
+          if [[ "${package_version}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$ ]]; then
+            package_version="${BASH_REMATCH[1]}"
+            package_build="${BASH_REMATCH[2]}"
+          elif [[ "${package_version}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
+            package_version="${BASH_REMATCH[1]}"
+            package_build="${BASH_REMATCH[2]}"
+          elif ! [[ "${package_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported tag format for package versioning: ${tag}" >&2
+            exit 1
+          fi
+
           build_tools_repo="ONLYOFFICE/build_tools"
           build_tools_ref="$(
             GITHUB_TOKEN="${GITHUB_TOKEN}" BUILD_TOOLS_REPO="${build_tools_repo}" \
@@ -75,6 +89,8 @@ jobs:
           fi
 
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "package_version=${package_version}" >> "${GITHUB_OUTPUT}"
+          echo "package_build=${package_build}" >> "${GITHUB_OUTPUT}"
           echo "connections_limit=${connections_limit}" >> "${GITHUB_OUTPUT}"
           echo "connections_file=${connections_file}" >> "${GITHUB_OUTPUT}"
           echo "build_branch=${build_branch}" >> "${GITHUB_OUTPUT}"
@@ -159,6 +175,7 @@ jobs:
             libxslt1-dev \
             libxmlsec1-dev \
             libxmlsec1-openssl \
+            symlinks \
             dpkg-dev \
             debhelper \
             devscripts \
@@ -265,6 +282,9 @@ jobs:
           tag="${{ steps.params.outputs.tag }}"
           branch="tags/${tag}"
           qt_dir="${GITHUB_WORKSPACE}/build_tools/tools/linux/qt_build/Qt-5.9.9"
+          export PRODUCT_VERSION="${{ steps.params.outputs.package_version }}"
+          export BUILD_NUMBER="${{ steps.params.outputs.package_build }}"
+          export BRANCH_NAME="${branch}"
 
           if [[ -z "${tag}" ]]; then
             echo "Resolved tag is empty." >&2
@@ -305,8 +325,16 @@ jobs:
       - name: Package .deb
         run: |
           set -euo pipefail
+          export PRODUCT_VERSION="${{ steps.params.outputs.package_version }}"
+          export BUILD_NUMBER="${{ steps.params.outputs.package_build }}"
+          export BRANCH_NAME="${{ steps.params.outputs.build_branch }}"
           cd ./build_tools
-          python3 make_package.py -P linux_x86_64 -T server_community
+          python3 make_package.py \
+            -P linux_x86_64 \
+            -T server_community \
+            -V "${PRODUCT_VERSION}" \
+            -B "${BUILD_NUMBER}" \
+            -H "${BRANCH_NAME}"
 
       - name: Upload .deb artifacts
         uses: actions/upload-artifact@v4
@@ -321,6 +349,8 @@ jobs:
           {
             echo "## Debian Build Summary"
             echo "- tag: ${{ steps.params.outputs.tag }}"
+            echo "- package_version: ${{ steps.params.outputs.package_version }}"
+            echo "- package_build: ${{ steps.params.outputs.package_build }}"
             echo "- build_branch: ${{ steps.params.outputs.build_branch }}"
             echo "- connections_limit: ${{ steps.params.outputs.connections_limit }}"
             echo "- build_tools_repo: ${{ steps.params.outputs.build_tools_repo }}"
