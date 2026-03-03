@@ -248,43 +248,7 @@ jobs:
           if [[ -z "${selected_ref}" ]]; then
             selected_ref="$(
               DOCUMENT_TAG_TIMESTAMP="${document_tag_timestamp}" \
-              python3 - <<'PY'
-              import os
-              import subprocess
-              import sys
-              
-              document_ts = int(os.environ["DOCUMENT_TAG_TIMESTAMP"])
-              output = subprocess.check_output(
-                  [
-                      "git",
-                      "-C",
-                      "./build_tools",
-                      "for-each-ref",
-                      "--format=%(refname:strip=2)\t%(creatordate:unix)",
-                      "refs/tags",
-                  ],
-                  text=True,
-              )
-              
-              tags = []
-              for line in output.splitlines():
-                  if not line.strip():
-                      continue
-                  name, ts = line.split("\t", 1)
-                  ts = int(ts)
-                  tags.append((name, ts))
-              
-              if not tags:
-                  sys.exit("Could not resolve any build_tools tags")
-              
-              newer_or_equal = [item for item in tags if item[1] >= document_ts]
-              if newer_or_equal:
-                  newer_or_equal.sort(key=lambda item: (item[1] - document_ts, item[1], item[0]))
-                  print(newer_or_equal[0][0])
-              else:
-                  tags.sort(key=lambda item: (item[1], item[0]), reverse=True)
-                  print(tags[0][0])
-              PY
+              python3 -c 'import os, subprocess, sys; document_ts=int(os.environ["DOCUMENT_TAG_TIMESTAMP"]); output=subprocess.check_output(["git","-C","./build_tools","for-each-ref","--format=%(refname:strip=2)\t%(creatordate:unix)","refs/tags"], text=True); tags=[]; [tags.append((name, int(ts))) for name, ts in (line.split("\t", 1) for line in output.splitlines() if line.strip())]; sys.exit("Could not resolve any build_tools tags") if not tags else None; newer_or_equal=[item for item in tags if item[1] >= document_ts]; print(sorted(newer_or_equal, key=lambda item: (item[1] - document_ts, item[1], item[0]))[0][0] if newer_or_equal else sorted(tags, key=lambda item: (item[1], item[0]), reverse=True)[0][0])'
             )"
             selected_ref_kind="date_fallback_tag"
           fi
