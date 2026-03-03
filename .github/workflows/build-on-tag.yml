@@ -207,37 +207,193 @@ jobs:
           set -euo pipefail
           sudo rm -f /usr/local/bin/grunt
 
-      - name: Checkout build_tools by nearest newer tag date
+      - name: Checkout build_tools by next-version compatibility window
         id: build_tools_checkout
         env:
           BUILD_TOOLS_REPO: ${{ steps.params.outputs.build_tools_repo }}
           TAG: ${{ steps.params.outputs.tag }}
+          PACKAGE_VERSION: ${{ steps.params.outputs.package_version }}
         run: |
           set -euo pipefail
 
           build_tools_url="https://github.com/${BUILD_TOOLS_REPO}.git"
-          document_tag_timestamp="$(git log -1 --format=%ct "refs/tags/${TAG}")"
-
-          if [[ -z "${document_tag_timestamp}" ]]; then
-            echo "Could not resolve timestamp for tag ${TAG}" >&2
-            exit 1
-          fi
 
           rm -rf ./build_tools
           git init ./build_tools
           git -C ./build_tools remote add origin "${build_tools_url}"
-          git -C ./build_tools fetch --force --filter=blob:none --tags origin
+          git -C ./build_tools fetch --force --prune --tags origin "+refs/heads/*:refs/remotes/origin/*"
 
-          selected_ref="$(
-            DOCUMENT_TAG_TIMESTAMP="${document_tag_timestamp}" \
-            python3 -c 'import os, subprocess, sys; document_ts=int(os.environ["DOCUMENT_TAG_TIMESTAMP"]); output=subprocess.check_output(["git","-C","./build_tools","for-each-ref","--format=%(refname:strip=2)\t%(creatordate:unix)","refs/tags"], text=True); tags=[]; [tags.append((name, int(ts))) for name, ts in (line.split("\t", 1) for line in output.splitlines() if line.strip())]; sys.exit("Could not resolve any build_tools tags") if not tags else None; newer_or_equal=[item for item in tags if item[1] >= document_ts]; print(sorted(newer_or_equal, key=lambda item: (item[1] - document_ts, item[1], item[0]))[0][0] if newer_or_equal else sorted(tags, key=lambda item: (item[1], item[0]), reverse=True)[0][0])'
-          )"
-          selected_ref_kind="date_fallback_tag"
+          BUILD_TOOLS_REPO_PATH="${GITHUB_WORKSPACE}/build_tools" \
+          DOCUMENT_TAG="${TAG}" \
+          DOCUMENT_VERSION="${PACKAGE_VERSION}" \
+          python3 - <<'PY' > "${RUNNER_TEMP}/build_tools_selection.env"
+          import os
+          import re
+          import subprocess
+          import sys
+
+          repo = os.environ["BUILD_TOOLS_REPO_PATH"]
+          document_tag = os.environ["DOCUMENT_TAG"]
+          document_version = os.environ["DOCUMENT_VERSION"]
+
+          def git(*args: str) -> str:
+              return subprocess.check_output(args, text=True).strip()
+
+          def normalize_tag(tag: str) -> str | None:
+              match = re.fullmatch(r"v?(\d+\.\d+\.\d+)(?:[.-]\d+)?", tag)
+              return match.group(1) if match else None
+
+          document_tags_output = git(
+              "git",
+              "for-each-ref",
+              "--format=%(refname:strip=2)\t%(creatordate:unix)",
+              "refs/tags",
+          )
+          version_first_seen: dict[str, int] = {}
+          for line in document_tags_output.splitlines():
+              if not line.strip():
+                  continue
+              tag_name, timestamp_text = line.split("\t", 1)
+              normalized = normalize_tag(tag_name)
+              if normalized is None:
+                  continue
+              timestamp = int(timestamp_text)
+              previous = version_first_seen.get(normalized)
+              if previous is None or timestamp < previous:
+                  version_first_seen[normalized] = timestamp
+
+          current_version_timestamp = version_first_seen.get(document_version)
+          if current_version_timestamp is None:
+              raise SystemExit(
+                  f"Could not resolve the first appearance date for DocumentServer version {document_version}."
+              )
+
+          next_version = ""
+          newer_versions = sorted(
+              (
+                  (timestamp, version)
+                  for version, timestamp in version_first_seen.items()
+                  if timestamp > current_version_timestamp
+              ),
+              key=lambda item: (item[0], item[1]),
+          )
+          if newer_versions:
+              next_version = newer_versions[0][1]
+
+          bump_commit = ""
+          bump_commit_timestamp = ""
+          if next_version:
+              log_output = git(
+                  "git",
+                  "-C",
+                  repo,
+                  "log",
+                  "--all",
+                  "--date-order",
+                  "--format=COMMIT\t%H\t%ct\t%s",
+                  "-p",
+                  "--",
+                  "version",
+              )
+              commit_blocks: list[list[str]] = []
+              current_block: list[str] = []
+              for line in log_output.splitlines():
+                  if line.startswith("COMMIT\t"):
+                      if current_block:
+                          commit_blocks.append(current_block)
+                      current_block = [line]
+                  else:
+                      current_block.append(line)
+              if current_block:
+                  commit_blocks.append(current_block)
+
+              bump_candidates: list[tuple[int, str]] = []
+              for block in commit_blocks:
+                  header = block[0].split("\t", 3)
+                  commit_sha = header[1]
+                  commit_timestamp = int(header[2])
+                  added_version = None
+                  for line in block[1:]:
+                      if line.startswith("+++") or line.startswith("---"):
+                          continue
+                      if line.startswith("+"):
+                          added_version = line[1:]
+                  if added_version == next_version:
+                      bump_candidates.append((commit_timestamp, commit_sha))
+
+              if not bump_candidates:
+                  raise SystemExit(
+                      f"Could not find a build_tools commit that updates version to {next_version}."
+                  )
+
+              bump_candidates.sort()
+              bump_commit_timestamp, bump_commit = bump_candidates[0]
+
+          selected_commit = ""
+          selected_ref_kind = ""
+          if bump_commit:
+              rev_list_output = git(
+                  "git",
+                  "-C",
+                  repo,
+                  "rev-list",
+                  "--all",
+                  f"--before={bump_commit_timestamp}",
+                  "--timestamp",
+              )
+              candidate_commits: list[tuple[int, str]] = []
+              for line in rev_list_output.splitlines():
+                  if not line.strip():
+                      continue
+                  timestamp_text, commit_sha = line.split(" ", 1)
+                  try:
+                      version_value = git("git", "-C", repo, "show", f"{commit_sha}:version")
+                  except subprocess.CalledProcessError:
+                      continue
+                  if version_value == document_version:
+                      candidate_commits.append((int(timestamp_text), commit_sha))
+
+              if not candidate_commits:
+                  raise SystemExit(
+                      f"Could not find a build_tools commit before bump {bump_commit} with version {document_version}."
+                  )
+
+              candidate_commits.sort()
+              selected_commit = candidate_commits[-1][1]
+              selected_ref_kind = "pre_next_version_bump"
+          else:
+              selected_commit = git("git", "-C", repo, "rev-parse", "origin/master")
+              selected_ref_kind = "origin_master_fallback"
+
+          selected_version = git("git", "-C", repo, "show", f"{selected_commit}:version")
+          if selected_version != document_version:
+              raise SystemExit(
+                  "Selected build_tools commit is incompatible: "
+                  f"expected version {document_version}, got {selected_version} at {selected_commit}."
+              )
+
+          print(f"selected_ref={selected_commit}")
+          print(f"selected_ref_kind={selected_ref_kind}")
+          print(f"selected_version={selected_version}")
+          print(f"next_document_version={next_version}")
+          print(f"bump_commit={bump_commit}")
+          PY
+
+          . "${RUNNER_TEMP}/build_tools_selection.env"
 
           echo "Selected build_tools ref: ${selected_ref} (${selected_ref_kind})"
-          git -C ./build_tools checkout --force "refs/tags/${selected_ref}"
+          if [[ -n "${bump_commit}" ]]; then
+            echo "Detected next DocumentServer version: ${next_document_version}"
+            echo "Detected build_tools bump commit: ${bump_commit}"
+          fi
+          echo "Validated build_tools version: ${selected_version}"
+
+          git -C ./build_tools checkout --force "${selected_ref}"
           echo "selected_ref=${selected_ref}" >> "${GITHUB_OUTPUT}"
           echo "selected_ref_kind=${selected_ref_kind}" >> "${GITHUB_OUTPUT}"
+          echo "selected_version=${selected_version}" >> "${GITHUB_OUTPUT}"
+          echo "next_document_version=${next_document_version}" >> "${GITHUB_OUTPUT}"
+          echo "bump_commit=${bump_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Validate build_tools core project list
         run: |
@@ -361,6 +517,14 @@ jobs:
             echo "- build_tools_repo: ${{ steps.params.outputs.build_tools_repo }}"
             echo "- build_tools_ref_selected: ${{ steps.build_tools_checkout.outputs.selected_ref }}"
             echo "- build_tools_ref_kind: ${{ steps.build_tools_checkout.outputs.selected_ref_kind }}"
+            echo "- build_tools_version_at_ref: ${{ steps.build_tools_checkout.outputs.selected_version }}"
+            if [[ -n "${{ steps.build_tools_checkout.outputs.next_document_version }}" ]]; then
+              echo "- next_document_version: ${{ steps.build_tools_checkout.outputs.next_document_version }}"
+              echo "- build_tools_bump_commit: ${{ steps.build_tools_checkout.outputs.bump_commit }}"
+            else
+              echo "- next_document_version: <none>"
+              echo "- build_tools_bump_commit: <fallback>"
+            fi
             if [[ -n "${{ steps.params.outputs.connections_file }}" ]]; then
               echo "- connections_file: ${{ steps.params.outputs.connections_file }}"
             else
