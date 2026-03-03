@@ -15,7 +15,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-on-tag-${{ github.event.client_payload.tag || github.ref_name || github.event.inputs.tag || github.run_id }}
@@ -321,6 +321,33 @@ jobs:
           path: |
             **/*.deb
           if-no-files-found: error
+
+      - name: Ensure GitHub release exists
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.params.outputs.tag }}"
+
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag}" --verify-tag --generate-notes
+          fi
+
+      - name: Upload .deb assets to GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.params.outputs.tag }}"
+          shopt -s globstar nullglob
+          debs=(**/*.deb)
+
+          if [[ "${#debs[@]}" -eq 0 ]]; then
+            echo "No .deb files found for release upload." >&2
+            exit 1
+          fi
+
+          gh release upload "${tag}" "${debs[@]}" --clobber
 
       - name: Build summary
         run: |
