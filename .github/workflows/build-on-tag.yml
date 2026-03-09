@@ -142,7 +142,8 @@ jobs:
             git -C "${meta_dir}" for-each-ref \
               --sort=-creatordate \
               --format='%(refname:strip=2)' \
-              refs/tags | head -n1
+              refs/tags \
+            | awk 'NR==1 { first=$0 } END { print first }'
           }
 
           select_prefix_max_tag() {
@@ -184,8 +185,7 @@ jobs:
                 }
               ' \
             | sort -t $'\t' -k1,1n -k2,2nr -k3,3Vr \
-            | head -n1 \
-            | cut -f3
+            | awk -F '\t' 'NR==1 { first=$3 } END { print first }'
           }
 
           clone_repo_by_strategy() {
