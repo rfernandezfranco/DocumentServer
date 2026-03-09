@@ -166,24 +166,26 @@ jobs:
             local target_ts="$2"
 
             git -C "${meta_dir}" for-each-ref \
-              --format='%(refname:strip=2)\t%(creatordate:unix)' \
+              --format='%(refname:strip=2)%09%(creatordate:unix)' \
               refs/tags \
-            | awk -F '\t' -v target="${target_ts}" '
+            | awk -v target="${target_ts}" '
                 {
-                  diff = $2 - target;
+                  n = split($0, parts, "\t");
+                  if (n != 2) {
+                    next;
+                  }
+                  tag = parts[1];
+                  ts = parts[2] + 0;
+                  diff = ts - target;
                   if (diff < 0) {
                     diff = -diff;
                   }
-                  if (best == "" || diff < best_diff || (diff == best_diff && $2 > best_ts)) {
-                    best = $1;
-                    best_diff = diff;
-                    best_ts = $2;
-                  }
+                  printf "%d\t%d\t%s\n", diff, ts, tag;
                 }
-                END {
-                  print best;
-                }
-              '
+              ' \
+            | sort -t $'\t' -k1,1n -k2,2nr -k3,3Vr \
+            | head -n1 \
+            | cut -f3
           }
 
           clone_repo_by_strategy() {
@@ -329,7 +331,7 @@ jobs:
           document_tags_output = git(
               "git",
               "for-each-ref",
-              "--format=%(refname:strip=2)\t%(creatordate:unix)",
+              "--format=%(refname:strip=2)%09%(creatordate:unix)",
               "refs/tags",
           )
           version_first_seen: dict[str, int] = {}
