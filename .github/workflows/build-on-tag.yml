@@ -116,31 +116,114 @@ jobs:
       - name: Prepare additional repositories for local build layout
         env:
           TAG: ${{ steps.params.outputs.tag }}
+          PACKAGE_VERSION: ${{ steps.params.outputs.package_version }}
         run: |
           set -euo pipefail
 
-          required_repos=(
-            "onlyoffice.github.io"
-            "document-server-integration"
+          document_tag_timestamp="$(git log -1 --format=%ct "refs/tags/${TAG}")"
+          if [[ -z "${document_tag_timestamp}" ]]; then
+            echo "Could not resolve timestamp for DocumentServer tag ${TAG}" >&2
+            exit 1
+          fi
+
+          prefix_match_repos=(
             "document-server-package"
-            "document-templates"
+            "document-server-integration"
             "document-formats"
           )
 
-          for repo in "${required_repos[@]}"; do
-            if [[ -d "${repo}/.git" ]]; then
-              echo "Repository already present: ${repo}"
-              continue
+          nearest_date_repos=(
+            "onlyoffice.github.io"
+            "document-templates"
+          )
+
+          select_latest_tag_by_date() {
+            local meta_dir="$1"
+            git -C "${meta_dir}" for-each-ref \
+              --sort=-creatordate \
+              --format='%(refname:strip=2)' \
+              refs/tags | head -n1
+          }
+
+          select_prefix_max_tag() {
+            local meta_dir="$1"
+            local version="$2"
+            mapfile -t matches < <(
+              git -C "${meta_dir}" tag -l "v${version}" "v${version}.*" | sort -V
+            )
+
+            if [[ "${#matches[@]}" -eq 0 ]]; then
+              select_latest_tag_by_date "${meta_dir}"
+              return
             fi
 
-            repo_url="https://github.com/ONLYOFFICE/${repo}.git"
-            if git ls-remote --exit-code --tags "${repo_url}" "refs/tags/${TAG}" >/dev/null 2>&1; then
-              echo "Cloning ${repo} at tag ${TAG}"
-              git clone --depth=1 --branch "${TAG}" "${repo_url}" "${repo}"
+            local last_index=$(( ${#matches[@]} - 1 ))
+            printf '%s\n' "${matches[${last_index}]}"
+          }
+
+          select_nearest_tag_by_date() {
+            local meta_dir="$1"
+            local target_ts="$2"
+
+            git -C "${meta_dir}" for-each-ref \
+              --format='%(refname:strip=2)\t%(creatordate:unix)' \
+              refs/tags \
+            | awk -F '\t' -v target="${target_ts}" '
+                {
+                  diff = $2 - target;
+                  if (diff < 0) {
+                    diff = -diff;
+                  }
+                  if (best == "" || diff < best_diff || (diff == best_diff && $2 > best_ts)) {
+                    best = $1;
+                    best_diff = diff;
+                    best_ts = $2;
+                  }
+                }
+                END {
+                  print best;
+                }
+              '
+          }
+
+          clone_repo_by_strategy() {
+            local repo="$1"
+            local strategy="$2"
+            local repo_url="https://github.com/ONLYOFFICE/${repo}.git"
+            local meta_dir="/tmp/${repo//./-}-meta-${GITHUB_RUN_ID:-local}"
+
+            rm -rf "${repo}" "${meta_dir}"
+            git init "${meta_dir}" >/dev/null
+            git -C "${meta_dir}" remote add origin "${repo_url}"
+            git -C "${meta_dir}" fetch --force --tags origin '+refs/tags/*:refs/tags/*' >/dev/null
+
+            local selected_tag=""
+            if [[ "${strategy}" == "prefix_max" ]]; then
+              selected_tag="$(select_prefix_max_tag "${meta_dir}" "${PACKAGE_VERSION}")"
+            elif [[ "${strategy}" == "nearest_date" ]]; then
+              selected_tag="$(select_nearest_tag_by_date "${meta_dir}" "${document_tag_timestamp}")"
             else
-              echo "Tag ${TAG} not found in ${repo}. Cloning master."
-              git clone --depth=1 --branch master "${repo_url}" "${repo}"
+              echo "Unknown selection strategy ${strategy} for ${repo}" >&2
+              exit 1
             fi
+
+            if [[ -z "${selected_tag}" ]]; then
+              echo "No tags found in ${repo}. Cloning master."
+              git clone --depth=1 --branch master "${repo_url}" "${repo}"
+            else
+              echo "Cloning ${repo} at tag ${selected_tag} (${strategy})"
+              git clone --depth=1 --branch "${selected_tag}" "${repo_url}" "${repo}"
+            fi
+
+            rm -rf "${meta_dir}"
+          }
+
+          for repo in "${prefix_match_repos[@]}"; do
+            clone_repo_by_strategy "${repo}" "prefix_max"
+          done
+
+          for repo in "${nearest_date_repos[@]}"; do
+            clone_repo_by_strategy "${repo}" "nearest_date"
           done
 
       - name: Set Git identity
