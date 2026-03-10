@@ -530,6 +530,24 @@ jobs:
             exit 1
           fi
 
+      - name: Wrap curl for CI network reliability
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.local/bin"
+          cat > "${HOME}/.local/bin/curl" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec /usr/bin/curl \
+            --http1.1 \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 2 \
+            --connect-timeout 20 \
+            "$@"
+          EOF
+          chmod +x "${HOME}/.local/bin/curl"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
       - name: Install build_tools dependencies and Qt
         run: |
           set -euo pipefail
