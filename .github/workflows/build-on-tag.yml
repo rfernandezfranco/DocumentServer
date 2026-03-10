@@ -298,6 +298,7 @@ jobs:
           BUILD_TOOLS_REPO: ${{ steps.params.outputs.build_tools_repo }}
           TAG: ${{ steps.params.outputs.tag }}
           PACKAGE_VERSION: ${{ steps.params.outputs.package_version }}
+          DEFAULT_PACKAGE_BUILD: ${{ steps.params.outputs.package_build }}
         run: |
           set -euo pipefail
 
@@ -311,6 +312,7 @@ jobs:
           BUILD_TOOLS_REPO_PATH="${GITHUB_WORKSPACE}/build_tools" \
           DOCUMENT_TAG="${TAG}" \
           DOCUMENT_VERSION="${PACKAGE_VERSION}" \
+          DEFAULT_PACKAGE_BUILD="${DEFAULT_PACKAGE_BUILD}" \
           python3 - <<'PY' > "${RUNNER_TEMP}/build_tools_selection.env"
           import os
           import re
@@ -320,6 +322,7 @@ jobs:
           repo = os.environ["BUILD_TOOLS_REPO_PATH"]
           document_tag = os.environ["DOCUMENT_TAG"]
           document_version = os.environ["DOCUMENT_VERSION"]
+          default_package_build = os.environ["DEFAULT_PACKAGE_BUILD"]
 
           def git(*args: str) -> str:
               return subprocess.check_output(args, text=True).strip()
@@ -416,6 +419,8 @@ jobs:
 
           selected_commit = ""
           selected_ref_kind = ""
+          selected_build_tools_tag = ""
+          resolved_package_build = default_package_build
           if bump_commit:
               rev_list_output = git(
                   "git",
@@ -447,8 +452,37 @@ jobs:
               selected_commit = candidate_commits[-1][1]
               selected_ref_kind = "pre_next_version_bump"
           else:
-              selected_commit = git("git", "-C", repo, "rev-parse", "origin/master")
-              selected_ref_kind = "origin_master_fallback"
+              matching_version_tags_output = git(
+                  "git",
+                  "-C",
+                  repo,
+                  "tag",
+                  "-l",
+                  f"v{document_version}.*",
+              )
+              matching_version_tags = []
+              pattern = re.compile(rf"^v{re.escape(document_version)}\.(\d+)$")
+              for tag_name in matching_version_tags_output.splitlines():
+                  if pattern.fullmatch(tag_name):
+                      matching_version_tags.append(tag_name)
+
+              if matching_version_tags:
+                  selected_build_tools_tag = max(
+                      matching_version_tags,
+                      key=lambda tag_name: int(tag_name.rsplit(".", 1)[1]),
+                  )
+                  selected_commit = git(
+                      "git",
+                      "-C",
+                      repo,
+                      "rev-parse",
+                      f"refs/tags/{selected_build_tools_tag}",
+                  )
+                  selected_ref_kind = "matching_version_tag_fallback"
+                  resolved_package_build = selected_build_tools_tag.rsplit(".", 1)[1]
+              else:
+                  selected_commit = git("git", "-C", repo, "rev-parse", "origin/master")
+                  selected_ref_kind = "origin_master_fallback"
 
           selected_version = git("git", "-C", repo, "show", f"{selected_commit}:version")
           if selected_version != document_version:
@@ -460,6 +494,8 @@ jobs:
           print(f"selected_ref={selected_commit}")
           print(f"selected_ref_kind={selected_ref_kind}")
           print(f"selected_version={selected_version}")
+          print(f"selected_build_tools_tag={selected_build_tools_tag}")
+          print(f"resolved_package_build={resolved_package_build}")
           print(f"next_document_version={next_version}")
           print(f"bump_commit={bump_commit}")
           PY
@@ -471,12 +507,18 @@ jobs:
             echo "Detected next DocumentServer version: ${next_document_version}"
             echo "Detected build_tools bump commit: ${bump_commit}"
           fi
+          if [[ -n "${selected_build_tools_tag}" ]]; then
+            echo "Selected build_tools tag: ${selected_build_tools_tag}"
+            echo "Resolved package build: ${resolved_package_build}"
+          fi
           echo "Validated build_tools version: ${selected_version}"
 
           git -C ./build_tools checkout --force "${selected_ref}"
           echo "selected_ref=${selected_ref}" >> "${GITHUB_OUTPUT}"
           echo "selected_ref_kind=${selected_ref_kind}" >> "${GITHUB_OUTPUT}"
           echo "selected_version=${selected_version}" >> "${GITHUB_OUTPUT}"
+          echo "selected_build_tools_tag=${selected_build_tools_tag}" >> "${GITHUB_OUTPUT}"
+          echo "resolved_package_build=${resolved_package_build}" >> "${GITHUB_OUTPUT}"
           echo "next_document_version=${next_document_version}" >> "${GITHUB_OUTPUT}"
           echo "bump_commit=${bump_commit}" >> "${GITHUB_OUTPUT}"
 
@@ -502,7 +544,7 @@ jobs:
           branch="tags/${tag}"
           qt_dir="${GITHUB_WORKSPACE}/build_tools/tools/linux/qt_build/Qt-5.9.9"
           export PRODUCT_VERSION="${{ steps.params.outputs.package_version }}"
-          export BUILD_NUMBER="${{ steps.params.outputs.package_build }}"
+          export BUILD_NUMBER="${{ steps.build_tools_checkout.outputs.resolved_package_build }}"
           export BRANCH_NAME="${branch}"
 
           if [[ -z "${tag}" ]]; then
@@ -545,7 +587,7 @@ jobs:
         run: |
           set -euo pipefail
           export PRODUCT_VERSION="${{ steps.params.outputs.package_version }}"
-          export BUILD_NUMBER="${{ steps.params.outputs.package_build }}"
+          export BUILD_NUMBER="${{ steps.build_tools_checkout.outputs.resolved_package_build }}"
           export BRANCH_NAME="${{ steps.params.outputs.build_branch }}"
           cd ./build_tools
           python3 make_package.py \
@@ -596,13 +638,18 @@ jobs:
             echo "## Debian Build Summary"
             echo "- tag: ${{ steps.params.outputs.tag }}"
             echo "- package_version: ${{ steps.params.outputs.package_version }}"
-            echo "- package_build: ${{ steps.params.outputs.package_build }}"
+            echo "- package_build: ${{ steps.build_tools_checkout.outputs.resolved_package_build }}"
             echo "- build_branch: ${{ steps.params.outputs.build_branch }}"
             echo "- connections_limit: ${{ steps.params.outputs.connections_limit }}"
             echo "- build_tools_repo: ${{ steps.params.outputs.build_tools_repo }}"
             echo "- build_tools_ref_selected: ${{ steps.build_tools_checkout.outputs.selected_ref }}"
             echo "- build_tools_ref_kind: ${{ steps.build_tools_checkout.outputs.selected_ref_kind }}"
             echo "- build_tools_version_at_ref: ${{ steps.build_tools_checkout.outputs.selected_version }}"
+            if [[ -n "${{ steps.build_tools_checkout.outputs.selected_build_tools_tag }}" ]]; then
+              echo "- build_tools_tag_used: ${{ steps.build_tools_checkout.outputs.selected_build_tools_tag }}"
+            else
+              echo "- build_tools_tag_used: <none>"
+            fi
             if [[ -n "${{ steps.build_tools_checkout.outputs.next_document_version }}" ]]; then
               echo "- next_document_version: ${{ steps.build_tools_checkout.outputs.next_document_version }}"
               echo "- build_tools_bump_commit: ${{ steps.build_tools_checkout.outputs.bump_commit }}"
