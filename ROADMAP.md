@@ -5,6 +5,48 @@ This document provides the roadmap of the planned ONLYOFFICE Document Server cha
 This is an updated and corrected version of the roadmap.
 We also reserve the right to change it when necessary.
 
+## Version 10.0
+
+### Server
+
+* Paid package only in Enterprise Edition and Developer Edition versions
+
+### AI
+
+* Updating the AI plugin in editors to the new version
+* Updated look of the AI plugin in editors
+* Support for working with document content in the AI plugin
+* Support for working with spreadsheet content in the AI plugin
+* Support for working with presentation content in the AI plugin
+* Support for working with PDF content in the AI plugin
+* Support for MCP and web search in the AI plugin
+* Converting a document to a PDF form with fields
+* Adjustment of PDF form fields according to the surrounding context
+
+### All editors
+
+* Support for client-side encryption
+* New methods for working with the editors API
+* Welcome page update in the Document Server
+* Admin panel update in the Document Server
+* Data table support for charts
+
+### Document Editor
+
+* Correct positioning of formulas and inline objects in RTL paragraphs
+* Text ellipsis by line height for precise line heights
+
+### Spreadsheet Editor
+
+* Range highlighting in the formula bar similar to cells
+* Speeding up the calculation of IFS formulas
+* Speed up for a large number of cell styles by separating styles and data
+
+### Presentation Editor
+
+* New display modes (outline, sorter, notesPage, handoutMaster, notesMaster)
+* New print settings
+
 ## Version 9.4
 
 ### All editors
