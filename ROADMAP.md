@@ -130,7 +130,6 @@ and converting text to columns
 
 * Working on implementing AI in editors
 * Ability to customize the toolbar
-* Ability to use fonts on the user's client
 * Font scaling settings
 * Ability to configure parts of a document for editing
 in protected mode
@@ -151,7 +150,6 @@ in protected mode
 
 ### Document Editor
 
-* docGrid support for Asian regions
 * Adding a Style Set for the Design tab
 * Ability to add borders for a page
 * Table wrapping settings
